@@ -1,0 +1,97 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                  String        @id @default(uuid())
+  telegramId          String        @unique
+  telegramUsername    String?
+  walletAddress       String        @unique
+  encryptedPrivateKey String
+  referralCode        String?       @unique
+  referredBy          String?
+  gasPriority         String        @default("standard")
+  walletImported      Boolean       @default(false)
+  walletImportedAt    DateTime?
+  activeChain         String        @default("base")
+  solanaPubkey        String?
+  encryptedSolanaKey  String?
+  createdAt           DateTime      @default(now())
+  dcaConfigs          DcaConfig[]
+  transactions        Transaction[]
+  priceAlerts         PriceAlert[]
+  limitOrders         LimitOrder[]
+}
+
+model DcaConfig {
+  id              String        @id @default(uuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id])
+  tokenSymbol     String
+  tokenAddress    String
+  chain           String        @default("base")
+  amountUsd       Float
+  interval        String
+  dailyCapUsd     Float
+  slippageCap     Float         @default(1.0)
+  maxBuyPrice     Float?
+  stopLossPrice   Float?
+  takeProfitPrice Float?
+  expiresAt       DateTime
+  isActive        Boolean       @default(true)
+  isPaused        Boolean       @default(false)
+  totalSpentUsd   Float         @default(0)
+  nextRunAt       DateTime
+  createdAt       DateTime      @default(now())
+  transactions    Transaction[]
+}
+
+model Transaction {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  dcaConfigId String
+  dcaConfig   DcaConfig @relation(fields: [dcaConfigId], references: [id])
+  tokenSymbol String
+  tokenAmount String
+  usdAmount   Float
+  txHash      String    @default("")
+  status      String
+  skipReason  String?
+  executedAt  DateTime  @default(now())
+}
+
+model PriceAlert {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  tokenSymbol String
+  tokenAddress String
+  targetPrice Float
+  direction   String
+  isActive    Boolean   @default(true)
+  isTriggered Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+}
+
+model LimitOrder {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  tokenSymbol  String
+  tokenAddress String
+  chain        String    @default("base")
+  amountUsd    Float
+  targetPrice  Float
+  direction    String
+  slippageCap  Float     @default(1.0)
+  isActive     Boolean   @default(true)
+  isFilled     Boolean   @default(false)
+  txHash       String?
+  createdAt    DateTime  @default(now())
+  filledAt     DateTime?
+}

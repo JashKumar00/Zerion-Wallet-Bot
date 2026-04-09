@@ -1,0 +1,286 @@
+You are building a fully functional, production-ready, multi-user Telegram bot that acts as an autonomous DCA (Dollar-Cost Averaging) onchain agent. This is a real submission for the Zerion Frontier Hackathon. Every transaction must be real — no mocks, no simulations, no fake data, no placeholder values anywhere in the code or UI.
+
+This bot is public-facing. Any person on Telegram can use it. Each user gets their own isolated wallet, their own DCA configs, their own policy settings, and their own transaction history. No user can ever see or touch another user's data or wallet.
+
+---
+
+PROJECT OVERVIEW
+A public Telegram bot where any user can:
+- Create a personal onchain wallet inside the bot
+- Set up automatic recurring token purchases (DCA) on Base chain
+- Define their own spend policies
+- Execute real onchain swaps via Zerion API on a schedule
+- Track their portfolio and transaction history in real time
+
+---
+
+TECH STACK
+- Runtime: Node.js (TypeScript)
+- Telegram Bot: telegraf
+- Wallet layer: Fork of https://github.com/zeriontech/zerion-ai — used as the execution and wallet base for all users
+- Swap routing: Zerion API only (https://developers.zerion.io)
+- Scheduler: node-cron — one global scheduler that loops through all active DCA configs across all users
+- Database: PostgreSQL (via prisma ORM) — for multi-user data at scale
+- Encryption: All private keys stored AES-256 encrypted in the database using a master encryption key from .env. Never stored in plaintext.
+- Chain: Base mainnet only (chainId: 8453) — hardcoded policy for all users, no exceptions
+- Environment: All secrets via .env
+
+---
+
+ENVIRONMENT VARIABLES (.env)
+TELEGRAM_BOT_TOKEN= 8764610343:AAEJJj_47YQK50sHeZi1s3ETohcdkEC4VGQ       # from @BotFather
+ZERION_API_KEY= zk_87b2c4b370f3482babde2e9ee3717fcb           # from https://dashboard.zerion.io
+DATABASE_URL=  postgresql://postgres:Jashkumar@00@db.vleckjrxdwrjecacdmef.supabase.co:5432/postgres            # PostgreSQL connection string
+MASTER_ENCRYPTION_KEY=  2780bd6c758b402f76fc8d169f6efbd417efa598e7a9b503c933773c3bed7896   # 32-byte hex key for AES-256 wallet encryption
+RPC_URL=  https://base-mainnet.g.alchemy.com/v2/XEDgarPp62S0Zid7jerqm                 # Base mainnet RPC (Alchemy or Infura)
+
+---
+
+DATABASE SCHEMA (Prisma)
+
+User {
+  id              String   @id @default(uuid())
+  telegramId      String   @unique   // Telegram user ID
+  telegramUsername String?
+  walletAddress   String   @unique
+  encryptedPrivateKey String        // AES-256 encrypted, never plaintext
+  createdAt       DateTime @default(now())
+  dcaConfigs      DcaConfig[]
+  transactions    Transaction[]
+}
+
+DcaConfig {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  tokenSymbol     String   // e.g. "ETH", "WBTC"
+  tokenAddress    String   // real contract address on Base
+  amountUsd       Float    // per-execution spend in USD
+  interval        String   // "hourly", "daily", "weekly"
+  dailyCapUsd     Float    // max USD in any 24h window (default: 3x amountUsd)
+  slippageCap     Float    // max slippage % (default: 1.0)
+  expiresAt       DateTime
+  isActive        Boolean  @default(true)
+  isPaused        Boolean  @default(false)
+  totalSpentUsd   Float    @default(0)
+  nextRunAt       DateTime
+  createdAt       DateTime @default(now())
+}
+
+Transaction {
+  id              String   @id @default(uuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  dcaConfigId     String
+  tokenSymbol     String
+  tokenAmount     String   // actual token amount received
+  usdAmount       Float    // USD spent
+  txHash          String   // real on-chain tx hash
+  status          String   // "success" | "failed" | "skipped"
+  skipReason      String?  // policy reason if skipped
+  executedAt      DateTime @default(now())
+}
+
+---
+
+USER ONBOARDING FLOW
+
+When a new user sends /start:
+1. Check if user exists in DB by telegramId
+2. If new user:
+   - Generate a brand new EVM wallet (address + private key) using ethers.js
+   - Encrypt the private key with AES-256 using MASTER_ENCRYPTION_KEY
+   - Save encrypted key and wallet address to DB
+   - Send welcome message with:
+     - Their new wallet address
+     - A clear warning: "Fund this wallet with USDC on Base network before setting up DCA"
+     - A link to Base bridge: https://bridge.base.org
+     - Instructions to always keep funds small — this is a hot wallet
+3. If existing user:
+   - Show wallet address, live USDC balance (from Zerion API), and active DCA count
+
+---
+
+TELEGRAM BOT COMMANDS
+
+/start
+  - Onboard new user or show dashboard for existing user
+  - Show wallet address + live balance from Zerion API
+
+/wallet
+  - Show wallet address
+  - Show live token balances on Base fetched from Zerion API
+  - Show total DCA configs active
+  - Show total USD spent across all configs (from DB)
+  - Warning reminder to never share private key (bot never shows private key)
+
+/setup <token> <amount_usd> <interval> [expiry_date]
+  - Example: /setup ETH 5 daily 2025-06-30
+  - Example: /setup WBTC 10 weekly
+  - Supported tokens: ETH, USDC, WBTC (with real Base contract addresses)
+  - Supported intervals: hourly, daily, weekly
+  - Expiry defaults to 30 days from now if not provided
+  - Validate all policies before saving
+  - Confirm with: next run time, total budget if all runs complete, expiry date
+
+/mystatus
+  - List all active DCA configs for this user
+  - For each: token, amount, interval, next run, total spent, remaining budget, expiry
+
+/pause <config_id>
+  - Pause a specific DCA config (get config_id from /mystatus)
+
+/resume <config_id>
+  - Resume a paused DCA config
+
+/cancel <config_id>
+  - Cancel and delete a DCA config
+  - Show summary: total spent, tokens acquired
+
+/history
+  - Show last 10 transactions for this user
+  - Each entry: date, token, amount received, USD spent, tx hash with basescan.org link, status
+
+/policies
+  - Show all policy rules enforced for this user's configs:
+    - Chain: Base only (chainId 8453)
+    - Per-execution spend limit
+    - Daily spend cap
+    - Expiry window
+    - Max slippage: 1%
+
+/price <token>
+  - Example: /price ETH
+  - Fetch and show real-time price from Zerion API
+  - Show 24h change %
+
+/help
+  - Show all commands with descriptions
+
+---
+
+POLICIES (enforced per user per config — judging criteria)
+
+All policies are checked before every swap execution. If any policy fails, the swap is skipped and the user is notified via Telegram.
+
+1. Chain Lock
+   - All swaps locked to Base (chainId: 8453). No exceptions for any user.
+
+2. Per-Execution Spend Limit
+   - Swap amount must not exceed the user's configured amountUsd by more than 0.5%.
+
+3. Daily Spend Cap
+   - Sum of all swaps for this user in the last 24 hours must not exceed dailyCapUsd.
+   - Default: 3x amountUsd. User can customize via /setup.
+
+4. Expiry Window
+   - If current time is past expiresAt, mark config inactive and notify user.
+
+5. Slippage Cap
+   - If Zerion API quote shows slippage above user's slippageCap (default 1%), skip and notify.
+
+6. Balance Check
+   - Before executing, verify user's wallet has enough USDC to cover the swap.
+   - If insufficient balance, skip and send: "❌ Insufficient balance. Please top up your wallet: [address]"
+
+---
+
+GLOBAL SCHEDULER
+
+- Runs every minute via node-cron
+- Fetches all DcaConfigs where isActive=true AND isPaused=false AND nextRunAt <= now
+- For each config:
+  1. Run all policy checks
+  2. If any policy fails: log skip reason to Transaction table, notify user via Telegram, update nextRunAt
+  3. If all pass: execute swap via Zerion API using that user's decrypted wallet
+  4. On success: save transaction, notify user, update totalSpentUsd and nextRunAt
+  5. On failure: log to Transaction table, notify user, update nextRunAt
+- Each user's execution is fully isolated — one user's failure never affects others
+
+---
+
+SWAP EXECUTION FLOW (per user)
+
+1. Decrypt user's private key using MASTER_ENCRYPTION_KEY
+2. Run all policy checks
+3. Call Zerion API to get a real swap quote:
+   - From: USDC on Base
+   - To: user's target token on Base
+   - Amount: user's amountUsd in USDC
+4. Validate quote: check slippage, output token, chain
+5. Sign and submit transaction using forked Zerion CLI wallet layer
+6. Poll for tx receipt (timeout: 3 minutes)
+7. On confirmation:
+   - Save to Transaction table
+   - Update DcaConfig (totalSpentUsd, nextRunAt)
+   - Send Telegram: "✅ DCA complete: bought [amount] [token] for $[usd]. Tx: https://basescan.org/tx/[hash]"
+8. On failure or timeout:
+   - Save failed transaction to DB
+   - Notify user via Telegram with reason
+   - Schedule next run normally — do not retry immediately
+
+---
+
+ZERION API USAGE
+- Base URL: https://api.zerion.io
+- Auth header: "Authorization: Basic <base64(ZERION_API_KEY:)>"
+- Endpoints to use:
+  - GET /v1/wallets/{address}/portfolio — live balances per user
+  - GET /v1/fungibles/?filter[search_query]={token} — token lookup + price
+  - POST /v1/swaps/quotes — get swap quote
+  - POST /v1/swaps/execute — execute swap
+- Never hardcode prices, balances, or token amounts. Always fetch live.
+
+---
+
+SECURITY REQUIREMENTS
+- Private keys are NEVER shown to the user under any circumstances
+- Private keys are NEVER logged to console or files
+- Private keys are stored AES-256 encrypted — decrypted only in memory at swap time, immediately discarded after
+- Each user can only access their own data — all DB queries must filter by telegramId
+- .env must be in .gitignore from the first commit
+- Rate limit bot commands: max 10 commands per user per minute to prevent abuse
+- Validate all user inputs before processing
+
+---
+
+PROJECT STRUCTURE
+/zerion-dca-bot
+  /src
+    bot.ts           # Telegraf bot, all command handlers
+    scheduler.ts     # Global cron loop across all users
+    swap.ts          # Zerion API swap quote + execution
+    policies.ts      # All policy enforcement logic
+    wallet.ts        # Wallet generation + AES encryption/decryption using Zerion CLI fork
+    zerion.ts        # Zerion API wrapper (portfolio, price, swaps)
+    db.ts            # Prisma client setup
+  /prisma
+    schema.prisma    # Full DB schema as above
+  .env.example       # All variable names, no values
+  .gitignore         # Must include .env and node_modules
+  README.md          # Full setup guide
+  package.json
+
+---
+
+README MUST INCLUDE
+- What the bot does
+- How to set it up (step by step)
+- Where to get each API key (BotFather, Zerion dashboard, Alchemy/Infura)
+- How to deploy (Railway or Render recommended for 24/7 uptime)
+- Security notes for users (fund wallet with small amounts only)
+- Link to demo video
+
+---
+
+STRICT RULES — NON-NEGOTIABLE
+- No mock data anywhere — not in tests, not in fallbacks, not in demos
+- No hardcoded prices, balances, or token amounts
+- No swap routing outside of Zerion API
+- No plaintext private keys anywhere in code, logs, or messages
+- No user can access another user's wallet or data
+- All policy checks must run before every single swap — no bypass conditions
+- Bot must handle 100+ concurrent users without breaking
+- All API errors must be caught, logged, and reported to the user via Telegram — never crash the process
+- Use async/await throughout
+- Deploy to a real server (Railway/Render) for 24/7 uptime — the bot cannot only work on localhost
